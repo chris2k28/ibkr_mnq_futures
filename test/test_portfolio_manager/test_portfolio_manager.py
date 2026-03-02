@@ -2,10 +2,9 @@ import pytest
 import pandas as pd
 from src.utilities.utils import trading_day_start_time_ts
 from src.portfolio.portfolio_manager import PortfolioManager
-from src.db.database import Database
 import os
 from src.configuration import Configuration
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 
 class TestPortfolioManager:
@@ -17,39 +16,38 @@ class TestPortfolioManager:
                                         "test", 
                                         "test_portfolio_manager", 
                                         "test_run.cfg"))
-        self.db = Database(self.cfg.timezone, 
-                           os.path.join(os.getcwd(), 
-                                        "test", 
-                                        "test_portfolio_manager", 
-                                        "test_trading.db"))
-        self.portfolio_manager = PortfolioManager(self.cfg, None, self.db)
+        self.mock_api = MagicMock()
+        self.portfolio_manager = PortfolioManager(self.cfg, self.mock_api)
 
-    def test_populate_from_db_intr_day_orders(self):
-        """Test trading day start time for morning trading"""
+    def test_sync_with_api(self):
+        """Test syncing state with the IBKR API"""
 
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setattr('src.portfolio.portfolio_manager.PortfolioManager._get_order_status', 
-                      lambda self, order_id: {'status': 'Filled'})
+        # Mock open orders
+        mock_order = MagicMock()
+        mock_order.orderId = 123
+        mock_order.parentId = 0
 
-            loaded_inventory = self.portfolio_manager.populate_from_db(check_state=False)
-            expected_inventory = (3, 3, 1)
-
-            assert loaded_inventory == expected_inventory
-
-    def test_populate_from_db_previous_day_orders(self):
-        """Test trading day start time for morning trading"""
-
-        fixed_start_time = pd.Timestamp("2025-04-01 21:00:00", tz=self.cfg.timezone)
+        self.mock_api.open_orders = {
+            123: {'order': mock_order, 'contract': MagicMock()}
+        }
+        self.mock_api.position_data = {}
         
-        # Create a mock for both functions
-        with patch('src.portfolio.portfolio_manager.trading_day_start_time_ts', 
-                  return_value=fixed_start_time), \
-             patch('src.portfolio.portfolio_manager.PortfolioManager._get_order_status', 
-                  return_value={'status': 'Filled'}):
-            
-            loaded_inventory = self.portfolio_manager.populate_from_db(check_state=False)
-            expected_inventory = (0, 0, 0)
+        self.portfolio_manager.sync_with_api()
 
-            assert loaded_inventory == expected_inventory
+        assert len(self.portfolio_manager.orders) == 1
+        assert self.portfolio_manager.orders[0][0][0].orderId == 123
+        self.mock_api.request_open_orders.assert_called_once()
+        self.mock_api.get_positions.assert_called_once()
+
+    def test_current_position_quantity(self):
+        """Test getting current position quantity from API"""
+        self.mock_api.position_data = {
+            'MNQ': {'position': 5, 'avg_cost': 15000}
+        }
+
+        quantity = self.portfolio_manager.current_position_quantity()
+
+        assert quantity == 5
+        self.mock_api.get_positions.assert_called_once()
 
 

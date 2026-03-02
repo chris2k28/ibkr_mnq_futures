@@ -8,7 +8,6 @@ from src.configuration import Configuration
 from src.strategys.bb_rsi_strategy import BollingerBandRSIStrategy
 from src.strategys.reversal_strategy import ReversalStrategy
 from src.utilities.enums import Signal
-from src.db.database import Database
 import pandas as pd
 import os
 import shutil
@@ -37,8 +36,7 @@ class TradingSystem:
         self.strategy = BollingerBandRSIStrategy()
         self.reversal_strategy = ReversalStrategy()
         self.config = cfg
-        self.db = Database(self.config.timezone)
-        self.portfolio_manager = PortfolioManager(cfg, self.api, self.db)
+        self.portfolio_manager = PortfolioManager(cfg, self.api)
 
         self.market_data = pd.DataFrame()
         
@@ -55,8 +53,7 @@ class TradingSystem:
                 logging.info("Live trading mode enabled")
 
             self.api.connect()
-            self.portfolio_manager.populate_from_db() 
-            self.risk_manager.populate_from_db(self.db)
+            self.portfolio_manager.sync_with_api()
 
             while True:
 
@@ -125,7 +122,7 @@ class TradingSystem:
 
             if self.risk_manager.should_pause_trading(pnl, self.config.number_of_contracts):
                 logging.warning(f"PnL: {pnl} is below max 24h loss. Pausing trading.")
-                self.risk_manager.set_trading_pause_time(self.db)
+                self.risk_manager.set_trading_pause_time()
 
                 logging.warning(f"Trading paused until {self.risk_manager.pause_end_time}")
                 time.sleep(60)

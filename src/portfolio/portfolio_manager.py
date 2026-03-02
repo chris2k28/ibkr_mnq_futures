@@ -10,17 +10,15 @@ from src.api.ibkr_api import IBConnection
 from src.configuration import Configuration
 import logging
 import time
-from src.db.database import Database
 from src.api.api_utils import get_current_contract, order_from_dict
 from src.utilities.utils import trading_day_start_time_ts
 
 
 class PortfolioManager:
 
-    def __init__(self, config: Configuration, api: IBConnection, db: Database):
+    def __init__(self, config: Configuration, api: IBConnection):
         self.config = config
         self.api = api
-        self.db = db
 
         self.positions: List[Position] = []
         self.orders: List[List[(Order, bool)]] = []       #list of bracket orders (list of 3 orders). bool is for whether an order has been resubmitted when cancelled
@@ -83,9 +81,6 @@ class PortfolioManager:
                             )
 
                             self.positions.append(position)
-                            self.db.add_position(position)
-
-                            self.db.update_order_status(order.orderId, order_status)
 
                             self.orders[bracket_idx][order_idx] = (order, True)
 
@@ -110,9 +105,6 @@ class PortfolioManager:
                             self.orders[bracket_idx][order_idx] = (order, True)
                             
                             self.positions.append(position)
-                            self.db.add_position(position)
-
-                            self.db.update_order_status(order.orderId, order_status)
                     
                     elif order.orderType in ['STP', 'TRAIL', 'LMT']:
 
@@ -136,9 +128,6 @@ class PortfolioManager:
                         self.orders[bracket_idx][order_idx] = (order, True)
 
                         self.positions.append(position)
-                        self.db.add_position(position)
-
-                        self.db.update_order_status(order.orderId, order_status)
 
                     else:
 
@@ -152,34 +141,12 @@ class PortfolioManager:
             for position in self.positions:
                 logging.info(str(position))
 
-        self.db.print_all_entries()
-
     def daily_pnl(self):
-        """Update the daily PnL. The daily pnl is made up from the PnL of all filled orders."""
-        pnl = 0
-
-        for bracket_order in self.orders:
-            # a backet order only hits realized pnl if 2 out of 3 orders are filled
-            # We need to check the status of each order and then sum the pnl of the filled orders
-
-            filled_count = 0
-            current_order_pnl = 0
-
-            for order, _ in bracket_order:
-
-                order_status = self._get_order_status(order.orderId)
-
-                if order_status['status'] == 'Filled':
-                    
-                    multiplier = 1 if order.action == 'SELL' else -1
-                    current_order_pnl += multiplier * order_status['avg_fill_price'] * int(order_status['filled'])
-                    
-                    filled_count += 1
-                
-            if filled_count >= 2:
-                pnl += current_order_pnl
-
-        return pnl
+        """Get the daily PnL from the IBKR API."""
+        pnl_data = self.api.get_account_pnl()
+        if pnl_data:
+            return pnl_data['realized_pnl']
+        return 0
 
     def place_bracket_order(self, action: str = "BUY", contract: Contract = None):
         """Place a bracket order"""
@@ -223,12 +190,6 @@ class PortfolioManager:
         """Handle a successful bracket order. This is called when all orders were accepted by the API."""
         logging.info("All orders were accepted by the API.")
         self.orders.append(list(zip(bracket, [False] * len(bracket))))
-        self.db.add_order(bracket)
-
-        for order in bracket:
-            order_id = order.orderId
-            status = self._get_order_status(order_id)
-            self.db.add_order_status(order_id, status)
 
         self.update_positions()
 
@@ -320,8 +281,6 @@ class PortfolioManager:
                     new_order_details = self.api.get_open_order(new_order_id)
                     
                     self.orders.append([(new_order_details['order'], False)])
-                    self.db.add_order(new_order_details['order'])
-                    self.db.add_order_status(new_order_id, self._get_order_status(new_order_id))
 
                     self.update_positions()
 
@@ -335,22 +294,20 @@ class PortfolioManager:
                     logging.info(f"Order {order.orderId} status - {self.api.order_statuses[order.orderId]}")
 
     def has_pending_orders(self):
-        for bracket_order in self.orders:
-
-            for order, _ in bracket_order:
-
-                order_status = self._get_order_status(order.orderId)['status']
-
-                if (order.orderType == 'MKT' and 
-                    order_status != 'Filled' and
-                    order_status != 'Cancelled'):
-
-                    return True
-                
+        """Check if there are any pending orders from the IBKR API."""
+        self.api.request_open_orders()
+        for order_id, order_info in self.api.open_orders.items():
+            status = self.api.get_order_status(order_id)
+            if status and status['status'] not in ['Filled', 'Cancelled', 'Inactive']:
+                return True
         return False
 
     def current_position_quantity(self):
-        return self.positions[-1].quantity if len(self.positions) > 0 else 0
+        """Get the current position quantity for the ticker from the IBKR API."""
+        self.api.get_positions()
+        if self.config.ticker in self.api.position_data:
+            return self.api.position_data[self.config.ticker]['position']
+        return 0
 
     def check_cancelled_market_order(self):
         """Check for cancelled market orders and resubmit them if required."""
@@ -469,11 +426,6 @@ class PortfolioManager:
             order_details = self.api.get_open_order(order_id)
             self.orders.append([(order_details['order'], False)])
 
-            self.db.add_order(order_details['order'])
-
-            order_id = order_details['order'].orderId
-            self.db.add_order_status(order_id, self._get_order_status(order_id))
-
             self.update_positions()
 
         else:
@@ -492,103 +444,33 @@ class PortfolioManager:
         self.positions = []
         self.order_statuses = {}
 
-    def populate_from_db(self, check_state: bool = True):
-        """Populate the orders from the database. Only orders created after the 
-        trading day start time are loaded. By loading orders and setting 
-        already_handled to False, we can ensure that the orders are processed 
-        again and dont have to load the positions from the database.
-        """
-        logging.info("PortfolioManager: Populating orders from database.")
-        self.db.print_all_entries()
+    def sync_with_api(self):
+        """Sync the internal state with the IBKR API."""
+        logging.info("PortfolioManager: Syncing state with IBKR API.")
 
-        raw_orders_and_positions = self.db.get_all_orders_and_positions()
-        raw_orders = raw_orders_and_positions['orders']
-        raw_positions = raw_orders_and_positions['positions']
+        # Initialize account PnL subscription
+        self.api.subscribe_account_pnl()
 
-        trading_day_start = trading_day_start_time_ts(self.config.trading_start_time, self.config.timezone)
+        # Request all open orders
+        self.api.request_open_orders()
 
-        logging.debug(f"PortfolioManager: Raw orders found: {len(raw_orders_and_positions['orders'])}")
-        loaded_orders = []
-        for order in raw_orders:
-            time_created = pd.to_datetime(order['created_timestamp'])
-            if time_created > trading_day_start:
-                loaded_orders.append(order_from_dict(order))
+        # Group open orders into brackets if they share a parent ID
+        # Note: This is a simplified reconstruction as we don't have the full original bracket structure
+        open_orders_by_parent = {}
+        for order_id, order_info in self.api.open_orders.items():
+            order = order_info['order']
+            parent_id = order.parentId if order.parentId != 0 else order.orderId
 
-        logging.debug(f"Loaded {len(loaded_orders)} orders from database.")
+            if parent_id not in open_orders_by_parent:
+                open_orders_by_parent[parent_id] = []
+            open_orders_by_parent[parent_id].append((order, False))
 
+        self.orders = list(open_orders_by_parent.values())
 
-        logging.info("PortfolioManager: Populating order statuses from database.")
+        # Request current positions
+        self.api.get_positions()
 
-        raw_order_statuses = self.db.get_all_order_statuses()
-        logging.debug(f"PortfolioManager: Raw order statuses found: {len(raw_order_statuses)}")
-
-        for order_id, status in raw_order_statuses.items():
-            time_last_modified = pd.to_datetime(status['last_modified'])
-
-            if time_last_modified > trading_day_start:
-                self.order_statuses[order_id] = status
-
-        logging.debug(f"Loaded {len(self.order_statuses)} order statuses from database.")
-
-        # Set whether a position has been logged from filled orders
-        filled_flags = []
-        for order in loaded_orders:
-            order_status = self._get_order_status(order.orderId)
-            if order_status['status'] == 'Filled':
-                filled_flags.append(True)
-            else:
-                filled_flags.append(False)
-
-        # Group orders into brackets of 3 orders each
-        bracket_orders = []
-        for i in range(0, len(loaded_orders), 3):
-            bracket = loaded_orders[i:i+3]
-            bracket_filled_flags = filled_flags[i:i+3]
-            bracket_orders.append(list(zip(bracket, bracket_filled_flags)))
-
-        self.orders = bracket_orders
-
-        logging.info("PortfolioManager: Populating positions from database.")
-        logging.debug(f"PortfolioManager: Raw positions found: {len(raw_positions)}")
-
-        for position in raw_positions:
-            time_created = pd.to_datetime(position['created_timestamp'])
-
-            if time_created > trading_day_start:
-                self.positions.append(Position.from_dict(position))
-
-        logging.debug(f"Loaded {len(self.positions)} positions from database.")
-
-        # Check that the latest position from the DB actually still exists in IBKR
-        if check_state:
-            if len(self.positions) > 0:
-                latest_db_position = self.positions[-1]
-                matching_position = self.api.get_matching_position(latest_db_position)
-
-                if matching_position is None:
-                    msg = f"Inconsistent DB state: Position {latest_db_position.ticker} with quantity {latest_db_position.quantity}"
-                    msg += f" from DB not found in IBKR. Reinitializing database and portfolio state."
-                    logging.error(msg)
-
-                    self.cancel_all_orders()
-                    self.clear_orders_statuses_positions()
-                    self.db.reinitialize()
-                    self.db.print_all_entries()
-
-                elif latest_db_position.quantity > int(matching_position['position']):
-                    msg = f"Inconsistent DB state: Position {latest_db_position.ticker} has {latest_db_position.quantity} contracts."
-                    msg += f" Only {int(matching_position['position'])} contracts are found on IBKR."
-                    msg += f" Reinitializing database and portfolio state."
-                    logging.error(msg)
-                    
-                    self.cancel_all_orders()
-                    self.clear_orders_statuses_positions()
-                    self.db.reinitialize()
-                    self.db.print_all_entries()
-                else:
-                    logging.info("DB state consistent with IBKR.")
-
-        return len(loaded_orders), len(self.order_statuses), len(self.positions)
+        logging.info(f"PortfolioManager: Synced {len(self.orders)} bracket(s) and {len(self.api.position_data)} position(s) from IBKR.")
 
 
 
