@@ -1,21 +1,28 @@
 from abc import ABC, abstractmethod
-
-
+import pandas as pd
 
 class AbstractStrategy(ABC):
     """
-    Abstract interface for trading strategies.
-
-    Defines methods for processing market data and generating trade signals.
+    Abstract base class for all trading strategies.
     """
-    @staticmethod
-    @abstractmethod
-    def generate_signals(historical_data, cfg):        
+    def __init__(self, config):
         """
-        Generate a trade signal based on the provided market data.
+        Initialize the strategy with configuration.
 
-        :param historical_data: Time series of historical data
-        :param cfg: Configuration instance
-        :return: Signal
+        Args:
+            config (Configuration): The configuration object.
+        """
+        self.config = config
+
+    @abstractmethod
+    def generate_signal(self, data: pd.DataFrame) -> int:
+        """
+        Generate a trading signal based on historical data.
+
+        Args:
+            data (pd.DataFrame): Historical market data.
+
+        Returns:
+            int: 1 for BUY, -1 for SELL, 0 for HOLD.
         """
         pass
