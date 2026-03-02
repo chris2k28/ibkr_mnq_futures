@@ -128,7 +128,7 @@ class PortfolioManager:
 
                         self.db.update_order_status(order.orderId, order_status)
                     
-                    elif order.orderType == 'STP' or order.orderType == 'LMT' and order.action == 'SELL':
+                    elif order.orderType in ['STP', 'TRAIL', 'LMT'] and order.action == 'SELL':
 
                         logging.info(f"{order.orderType} order filled, updating position.")
 
@@ -180,7 +180,7 @@ class PortfolioManager:
 
                 if order_status['status'] == 'Filled':
                     
-                    if order.orderType == 'STP' or order.orderType == 'LMT' and order.action == 'SELL':
+                    if order.orderType in ['STP', 'TRAIL', 'LMT'] and order.action == 'SELL':
 
                         current_order_pnl += order_status['avg_fill_price'] * int(order_status['filled'])
 
@@ -226,7 +226,8 @@ class PortfolioManager:
             "BUY", 
             self.config.number_of_contracts, 
             take_profit_limit_price, 
-            stop_loss_price)
+            stop_loss_price,
+            trailing_stop_ticks=self.config.trailing_stop_ticks if self.config.use_trailing_stop else None)
         
         self.api.place_orders(bracket, contract)
 
@@ -270,10 +271,11 @@ class PortfolioManager:
 
             logging.error("Order callbacks still not received for all orders. Handling cancellations")
 
-            mkt_order, lmt_order, stp_order = bracket[0], bracket[1], bracket[2]
-            for left_order, order_type in zip([mkt_order, lmt_order, stp_order], ['MKT', 'LMT', 'STP']):
-                if left_order.orderType != order_type:
-                    logging.error(f"Bracket order not in expected order. Please check.")
+            mkt_order, lmt_order, stop_order = bracket[0], bracket[1], bracket[2]
+            if (mkt_order.orderType != 'MKT' or
+                lmt_order.orderType != 'LMT' or
+                stop_order.orderType not in ['STP', 'TRAIL']):
+                logging.error(f"Bracket order not in expected order. Please check.")
 
             if not self.api.order_statuses[mkt_order.orderId]:
                 logging.error(f"MKT order {mkt_order.orderId} is not in the order status dictionary.")
@@ -282,45 +284,45 @@ class PortfolioManager:
 
                 if self.api.order_statuses[mkt_order.orderId]['status'] == "Cancelled":
                     logging.info(f"MKT order {mkt_order.orderId} was cancelled successfully.")
-                    logging.info(f"Now cancelling LMT and STP orders")
+                    logging.info(f"Now cancelling LMT and {stop_order.orderType} orders")
 
                     self.api.cancel_order(lmt_order.orderId)
-                    self.api.cancel_order(stp_order.orderId)
+                    self.api.cancel_order(stop_order.orderId)
 
                     logging.info(f"LMT order {lmt_order.orderId} status: {self.api.order_statuses[lmt_order.orderId]['status']}")
-                    logging.info(f"STP order {stp_order.orderId} status: {self.api.order_statuses[stp_order.orderId]['status']}")
+                    logging.info(f"{stop_order.orderType} order {stop_order.orderId} status: {self.api.order_statuses[stop_order.orderId]['status']}")
 
                     if (self.api.order_statuses[lmt_order.orderId]['status'] != "Cancelled" or
-                        self.api.order_statuses[stp_order.orderId]['status'] != "Cancelled"):
-                        logging.error(f"LMT or STP order was not cancelled. Please check.")
+                        self.api.order_statuses[stop_order.orderId]['status'] != "Cancelled"):
+                        logging.error(f"LMT or {stop_order.orderType} order was not cancelled. Please check.")
                         return
 
             else:
                 logging.info(f"MKT order {mkt_order.orderId} status received: {self.api.order_statuses[mkt_order.orderId]['status']}")
 
-            if not self.api.order_statuses[lmt_order.orderId] or not self.api.order_statuses[stp_order.orderId]:
+            if not self.api.order_statuses[lmt_order.orderId] or not self.api.order_statuses[stop_order.orderId]:
                 # If we're here it means that the MKT order was accepted by the API but not the brackets.
                 logging.error(f"LMT order status: {self.api.order_statuses[lmt_order.orderId]}")
-                logging.error(f"STP order status: {self.api.order_statuses[stp_order.orderId]}")
+                logging.error(f"{stop_order.orderType} order status: {self.api.order_statuses[stop_order.orderId]}")
                 
                 #Try to cancel the brackets
                 self.api.cancel_order(lmt_order.orderId)
-                self.api.cancel_order(stp_order.orderId)
+                self.api.cancel_order(stop_order.orderId)
 
                 if self.api.order_statuses[lmt_order.orderId]['status'] == "Cancelled":
                     logging.info(f"LMT order {lmt_order.orderId} was cancelled successfully.")
                 else:
                     logging.error(f"Could not cancel LMT order. Status: {self.api.order_statuses[lmt_order.orderId]['status']}")
 
-                if self.api.order_statuses[stp_order.orderId]['status'] == "Cancelled":
-                    logging.info(f"STP order {stp_order.orderId} was cancelled successfully.")
+                if self.api.order_statuses[stop_order.orderId]['status'] == "Cancelled":
+                    logging.info(f"{stop_order.orderType} order {stop_order.orderId} was cancelled successfully.")
                 else:
-                    logging.error(f"Could not cancel STP order. Status: {self.api.order_statuses[stp_order.orderId]['status']}")
+                    logging.error(f"Could not cancel {stop_order.orderType} order. Status: {self.api.order_statuses[stop_order.orderId]['status']}")
 
                 # Handle case where brackets are cancelled but the market order is filled
                 if (self.api.order_statuses[mkt_order.orderId]['status'] == "Filled" and
                     self.api.order_statuses[lmt_order.orderId]['status'] == "Cancelled" and
-                    self.api.order_statuses[stp_order.orderId]['status'] == "Cancelled"):
+                    self.api.order_statuses[stop_order.orderId]['status'] == "Cancelled"):
 
                     logging.warning(f"Market order {mkt_order.orderId} was filled while brackets were cancelled.")
                     logging.warning(f"Closing open position.")

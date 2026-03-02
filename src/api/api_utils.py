@@ -32,6 +32,8 @@ def order_from_dict(order_dict: dict) -> Order:
     order.totalQuantity = order_dict['quantity']
     order.auxPrice = order_dict['aux_price']
     order.lmtPrice = order_dict['lmt_price']
+    if 'trail_stop_price' in order_dict:
+        order.trailStopPrice = order_dict['trail_stop_price']
     order.parentId = order_dict['parent_id']
     order.transmit = order_dict['transmit']
     
