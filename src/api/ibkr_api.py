@@ -444,7 +444,8 @@ class IBConnection(EWrapper, EClient):
                              action:str,
                              quantity:float, 
                              take_profit_limit_price:float, 
-                             stop_loss_price:float):
+                             stop_loss_price:float,
+                             trailing_stop_ticks:float = None):
         """Create a bracket order"""
         parent_order_id = self.next_order_id
         self.next_order_id += 1
@@ -470,8 +471,15 @@ class IBConnection(EWrapper, EClient):
         stopLoss = Order()
         stopLoss.orderId = self.next_order_id
         stopLoss.action = "SELL" if action == "BUY" else "BUY" 
-        stopLoss.orderType = "STP"
-        stopLoss.auxPrice = stop_loss_price
+
+        if trailing_stop_ticks:
+            stopLoss.orderType = "TRAIL"
+            stopLoss.auxPrice = trailing_stop_ticks
+            stopLoss.trailStopPrice = stop_loss_price
+        else:
+            stopLoss.orderType = "STP"
+            stopLoss.auxPrice = stop_loss_price
+
         stopLoss.totalQuantity = quantity
         stopLoss.parentId = parent_order_id
         stopLoss.transmit = True

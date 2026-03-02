@@ -64,10 +64,12 @@ class PortfolioManager:
                     order_details = self.api.get_open_order(order.orderId)
                     contract = order_details['contract']
                     
-                    if order.orderType == 'MKT' and order.action == 'BUY':
+                    if order.orderType == 'MKT':
 
                         if len(self.positions) == 0:
-                            logging.info(f"Buy order filled, creating new position.")
+                            logging.info(f"{order.action} order filled, creating new position.")
+
+                            quantity = int(order.totalQuantity) if order.action == 'BUY' else -int(order.totalQuantity)
 
                             position = Position(
                             ticker=contract.symbol,
@@ -75,7 +77,7 @@ class PortfolioManager:
                             currency=contract.currency,
                             expiry=contract.lastTradeDateOrContractMonth,
                             contract_id=contract.conId,
-                            quantity=int(order.totalQuantity),
+                            quantity=quantity,
                             avg_price=order_status['avg_fill_price'],
                             timezone=self.config.timezone,
                             )
@@ -88,16 +90,21 @@ class PortfolioManager:
                             self.orders[bracket_idx][order_idx] = (order, True)
 
                         else:
-                            logging.info(f"Buy order filled, updating position.")
+                            logging.info(f"{order.action} order filled, updating position.")
 
                             position = copy.deepcopy(self.positions[-1])
 
-                            total_quantity = position.quantity + int(order.totalQuantity)
-                            avg_price = position.quantity * position.avg_price
-                            avg_price += int(order.totalQuantity) * order_status['avg_fill_price'] 
-                            avg_price /= total_quantity
+                            change_in_quantity = int(order.totalQuantity) if order.action == 'BUY' else -int(order.totalQuantity)
+                            new_total_quantity = position.quantity + change_in_quantity
 
-                            position.quantity = total_quantity
+                            if new_total_quantity != 0:
+                                avg_price = abs(position.quantity) * position.avg_price
+                                avg_price += abs(change_in_quantity) * order_status['avg_fill_price']
+                                avg_price /= (abs(position.quantity) + abs(change_in_quantity))
+                            else:
+                                avg_price = 0 # Position closed
+
+                            position.quantity = new_total_quantity
                             position.avg_price = avg_price
 
                             self.orders[bracket_idx][order_idx] = (order, True)
@@ -106,40 +113,24 @@ class PortfolioManager:
                             self.db.add_position(position)
 
                             self.db.update_order_status(order.orderId, order_status)
-
-                    elif order.orderType == 'MKT' and order.action == 'SELL':
-
-                        logging.info(f"Market sell order filled, updating position.")
-
-                        position = copy.deepcopy(self.positions[-1])
-
-                        total_quantity = position.quantity - int(order.totalQuantity)
-                        avg_price = position.quantity * position.avg_price
-                        avg_price += int(order.totalQuantity) * order_status['avg_fill_price'] 
-                        avg_price /= (position.quantity + int(order.totalQuantity))
-
-                        position.quantity = total_quantity
-                        position.avg_price = avg_price
-                        
-                        self.orders[bracket_idx][order_idx] = (order, True)
-
-                        self.positions.append(position)
-                        self.db.add_position(position)
-
-                        self.db.update_order_status(order.orderId, order_status)
                     
-                    elif order.orderType == 'STP' or order.orderType == 'LMT' and order.action == 'SELL':
+                    elif order.orderType in ['STP', 'TRAIL', 'LMT']:
 
                         logging.info(f"{order.orderType} order filled, updating position.")
 
                         position = copy.deepcopy(self.positions[-1])
 
-                        total_quantity = position.quantity - int(order.totalQuantity)
-                        avg_price = position.quantity * position.avg_price
-                        avg_price += int(order.totalQuantity) * order_status['avg_fill_price'] 
-                        avg_price /= (position.quantity + int(order.totalQuantity))
+                        change_in_quantity = int(order.totalQuantity) if order.action == 'BUY' else -int(order.totalQuantity)
+                        new_total_quantity = position.quantity + change_in_quantity
 
-                        position.quantity = total_quantity
+                        if new_total_quantity != 0:
+                            avg_price = abs(position.quantity) * position.avg_price
+                            avg_price += abs(change_in_quantity) * order_status['avg_fill_price']
+                            avg_price /= (abs(position.quantity) + abs(change_in_quantity))
+                        else:
+                            avg_price = 0 # Position closed
+
+                        position.quantity = new_total_quantity
                         position.avg_price = avg_price
 
                         self.orders[bracket_idx][order_idx] = (order, True)
@@ -180,21 +171,8 @@ class PortfolioManager:
 
                 if order_status['status'] == 'Filled':
                     
-                    if order.orderType == 'STP' or order.orderType == 'LMT' and order.action == 'SELL':
-
-                        current_order_pnl += order_status['avg_fill_price'] * int(order_status['filled'])
-
-                    elif order.orderType == 'MKT' and order.action == 'BUY':
-
-                        current_order_pnl -= order_status['avg_fill_price'] * int(order_status['filled'])
-
-                    elif order.orderType == 'MKT' and order.action == 'SELL':
-
-                        current_order_pnl += order_status['avg_fill_price'] * int(order_status['filled'])
-
-                    else:
-
-                        raise TypeError(f"Order type {order.orderType} with action {order.action} is not supported.")
+                    multiplier = 1 if order.action == 'SELL' else -1
+                    current_order_pnl += multiplier * order_status['avg_fill_price'] * int(order_status['filled'])
                     
                     filled_count += 1
                 
@@ -203,9 +181,9 @@ class PortfolioManager:
 
         return pnl
 
-    def place_bracket_order(self, contract: Contract = None):
+    def place_bracket_order(self, action: str = "BUY", contract: Contract = None):
         """Place a bracket order"""
-        logging.debug("Placing bracket order.")
+        logging.debug(f"Placing {action} bracket order.")
         contract = self.get_current_contract() if contract is None else contract
 
         mid_price = self.api.get_latest_mid_price(contract)
@@ -214,8 +192,12 @@ class PortfolioManager:
             logging.error(f"No mid price found for contract {contract.symbol}. Cannot place bracket order.")
             return
         
-        stop_loss_price = mid_price - (self.config.stop_loss_ticks * self.config.mnq_tick_size)
-        take_profit_limit_price = mid_price + (self.config.take_profit_ticks * self.config.mnq_tick_size)
+        if action == "BUY":
+            stop_loss_price = mid_price - (self.config.stop_loss_ticks * self.config.mnq_tick_size)
+            take_profit_limit_price = mid_price + (self.config.take_profit_ticks * self.config.mnq_tick_size)
+        else: # SELL
+            stop_loss_price = mid_price + (self.config.stop_loss_ticks * self.config.mnq_tick_size)
+            take_profit_limit_price = mid_price - (self.config.take_profit_ticks * self.config.mnq_tick_size)
 
         stop_loss_price = round(stop_loss_price/self.config.mnq_tick_size) * self.config.mnq_tick_size
         take_profit_limit_price = round(take_profit_limit_price/self.config.mnq_tick_size) * self.config.mnq_tick_size
@@ -223,10 +205,11 @@ class PortfolioManager:
         logging.debug(f"STP price: {stop_loss_price}, LMT price: {take_profit_limit_price}")
 
         bracket = self.api.create_bracket_order(
-            "BUY", 
+            action,
             self.config.number_of_contracts, 
             take_profit_limit_price, 
-            stop_loss_price)
+            stop_loss_price,
+            trailing_stop_ticks=(self.config.trailing_stop_ticks * self.config.mnq_tick_size) if self.config.use_trailing_stop else None)
         
         self.api.place_orders(bracket, contract)
 
@@ -270,10 +253,11 @@ class PortfolioManager:
 
             logging.error("Order callbacks still not received for all orders. Handling cancellations")
 
-            mkt_order, lmt_order, stp_order = bracket[0], bracket[1], bracket[2]
-            for left_order, order_type in zip([mkt_order, lmt_order, stp_order], ['MKT', 'LMT', 'STP']):
-                if left_order.orderType != order_type:
-                    logging.error(f"Bracket order not in expected order. Please check.")
+            mkt_order, lmt_order, stop_order = bracket[0], bracket[1], bracket[2]
+            if (mkt_order.orderType != 'MKT' or
+                lmt_order.orderType != 'LMT' or
+                stop_order.orderType not in ['STP', 'TRAIL']):
+                logging.error(f"Bracket order not in expected order. Please check.")
 
             if not self.api.order_statuses[mkt_order.orderId]:
                 logging.error(f"MKT order {mkt_order.orderId} is not in the order status dictionary.")
@@ -282,45 +266,45 @@ class PortfolioManager:
 
                 if self.api.order_statuses[mkt_order.orderId]['status'] == "Cancelled":
                     logging.info(f"MKT order {mkt_order.orderId} was cancelled successfully.")
-                    logging.info(f"Now cancelling LMT and STP orders")
+                    logging.info(f"Now cancelling LMT and {stop_order.orderType} orders")
 
                     self.api.cancel_order(lmt_order.orderId)
-                    self.api.cancel_order(stp_order.orderId)
+                    self.api.cancel_order(stop_order.orderId)
 
                     logging.info(f"LMT order {lmt_order.orderId} status: {self.api.order_statuses[lmt_order.orderId]['status']}")
-                    logging.info(f"STP order {stp_order.orderId} status: {self.api.order_statuses[stp_order.orderId]['status']}")
+                    logging.info(f"{stop_order.orderType} order {stop_order.orderId} status: {self.api.order_statuses[stop_order.orderId]['status']}")
 
                     if (self.api.order_statuses[lmt_order.orderId]['status'] != "Cancelled" or
-                        self.api.order_statuses[stp_order.orderId]['status'] != "Cancelled"):
-                        logging.error(f"LMT or STP order was not cancelled. Please check.")
+                        self.api.order_statuses[stop_order.orderId]['status'] != "Cancelled"):
+                        logging.error(f"LMT or {stop_order.orderType} order was not cancelled. Please check.")
                         return
 
             else:
                 logging.info(f"MKT order {mkt_order.orderId} status received: {self.api.order_statuses[mkt_order.orderId]['status']}")
 
-            if not self.api.order_statuses[lmt_order.orderId] or not self.api.order_statuses[stp_order.orderId]:
+            if not self.api.order_statuses[lmt_order.orderId] or not self.api.order_statuses[stop_order.orderId]:
                 # If we're here it means that the MKT order was accepted by the API but not the brackets.
                 logging.error(f"LMT order status: {self.api.order_statuses[lmt_order.orderId]}")
-                logging.error(f"STP order status: {self.api.order_statuses[stp_order.orderId]}")
+                logging.error(f"{stop_order.orderType} order status: {self.api.order_statuses[stop_order.orderId]}")
                 
                 #Try to cancel the brackets
                 self.api.cancel_order(lmt_order.orderId)
-                self.api.cancel_order(stp_order.orderId)
+                self.api.cancel_order(stop_order.orderId)
 
                 if self.api.order_statuses[lmt_order.orderId]['status'] == "Cancelled":
                     logging.info(f"LMT order {lmt_order.orderId} was cancelled successfully.")
                 else:
                     logging.error(f"Could not cancel LMT order. Status: {self.api.order_statuses[lmt_order.orderId]['status']}")
 
-                if self.api.order_statuses[stp_order.orderId]['status'] == "Cancelled":
-                    logging.info(f"STP order {stp_order.orderId} was cancelled successfully.")
+                if self.api.order_statuses[stop_order.orderId]['status'] == "Cancelled":
+                    logging.info(f"{stop_order.orderType} order {stop_order.orderId} was cancelled successfully.")
                 else:
-                    logging.error(f"Could not cancel STP order. Status: {self.api.order_statuses[stp_order.orderId]['status']}")
+                    logging.error(f"Could not cancel {stop_order.orderType} order. Status: {self.api.order_statuses[stop_order.orderId]['status']}")
 
                 # Handle case where brackets are cancelled but the market order is filled
                 if (self.api.order_statuses[mkt_order.orderId]['status'] == "Filled" and
                     self.api.order_statuses[lmt_order.orderId]['status'] == "Cancelled" and
-                    self.api.order_statuses[stp_order.orderId]['status'] == "Cancelled"):
+                    self.api.order_statuses[stop_order.orderId]['status'] == "Cancelled"):
 
                     logging.warning(f"Market order {mkt_order.orderId} was filled while brackets were cancelled.")
                     logging.warning(f"Closing open position.")
@@ -446,7 +430,7 @@ class PortfolioManager:
                     self.api.cancel_order(order.orderId)
 
     def close_all_positions(self):
-        """Close all open positions by issuing market sell orders."""
+        """Close all open positions by issuing market orders."""
         logging.info("Closing all open positions.")
 
         if len(self.positions) == 0:
@@ -456,7 +440,7 @@ class PortfolioManager:
         # The last position entry is the current position
         position = self.positions[-1]
 
-        if position.quantity > 0:
+        if position.quantity != 0:
             logging.info(f"Closing position for {position.ticker} with quantity {position.quantity}")
             matching_position = self.api.get_matching_position(position)
 
@@ -466,7 +450,7 @@ class PortfolioManager:
                 return
 
             native_contract_quantity = int(matching_position['position'])
-            if position.quantity > native_contract_quantity:
+            if abs(position.quantity) > abs(native_contract_quantity):
                 msg = f"Trying to close position {position.ticker} with quantity {position.quantity}."
                 msg += f" Only {native_contract_quantity} contracts are found on IBKR. Cannot close local position."
                 logging.error(msg)
@@ -480,7 +464,8 @@ class PortfolioManager:
             contract.lastTradeDateOrContractMonth = position.expiry
 
             # Place the order
-            order_id, _ = self.api.place_market_order(contract, "SELL", position.quantity)
+            action = "SELL" if position.quantity > 0 else "BUY"
+            order_id, _ = self.api.place_market_order(contract, action, abs(position.quantity))
             order_details = self.api.get_open_order(order_id)
             self.orders.append([(order_details['order'], False)])
 
@@ -491,13 +476,9 @@ class PortfolioManager:
 
             self.update_positions()
 
-        elif position.quantity == 0:
+        else:
             msg = f"Position {position.ticker} with quantity {position.quantity}. No positions to close"
             logging.info(msg)
-        else:
-            msg = f"Trying to close position {position.ticker} with quantity {position.quantity}. None handled scenario."
-            logging.error(msg)
-            raise NotImplementedError(msg)
     
     def _total_orders(self):
         return sum(len(bracket_order) for bracket_order in self.orders)

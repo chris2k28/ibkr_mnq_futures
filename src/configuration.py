@@ -33,6 +33,8 @@ class Configuration:
         self.strategy = self.config.get('Trading', 'strategy')
 
         # Risk Management section
+        self.use_trailing_stop = self.config.getboolean('Risk_Management', 'use_trailing_stop')
+        self.trailing_stop_ticks = self.config.getfloat('Risk_Management', 'trailing_stop_ticks')
         self.stop_loss_ticks = self.config.getfloat('Risk_Management', 'stop_loss_ticks')
         self.take_profit_ticks = self.config.getfloat('Risk_Management', 'take_profit_ticks')
         self.max_24h_loss_per_contract = self.config.getfloat('Risk_Management', 'max_24h_loss_per_contract')
@@ -58,6 +60,8 @@ class Configuration:
         self.bollinger_std = self.config.getint('Technical_Indicators', 'bollinger_std')
         self.rsi_period = self.config.getint('Technical_Indicators', 'rsi_period')
         self.rsi_threshold = self.config.getint('Technical_Indicators', 'rsi_threshold')
+        self.rsi_oversold = self.config.getint('Technical_Indicators', 'rsi_oversold')
+        self.rsi_overbought = self.config.getint('Technical_Indicators', 'rsi_overbought')
 
     def _configure_log(self, log_level: str):
         if log_level == "Debug":

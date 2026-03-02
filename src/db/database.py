@@ -81,6 +81,7 @@ class Database:
                         quantity INTEGER NOT NULL,
                         aux_price REAL,
                         lmt_price REAL,
+                        trail_stop_price REAL,
                         parent_id INTEGER,
                         transmit BOOLEAN NOT NULL,
                         created_timestamp TIMESTAMP NOT NULL
@@ -151,8 +152,8 @@ class Database:
                     cursor.execute('''
                         INSERT INTO orders (
                             order_id, action, order_type, quantity, aux_price,
-                            lmt_price, parent_id, transmit, created_timestamp
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            lmt_price, trail_stop_price, parent_id, transmit, created_timestamp
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
                         cur_order.orderId,
                         cur_order.action,
@@ -160,6 +161,7 @@ class Database:
                         cur_order.totalQuantity,
                         cur_order.auxPrice,
                         cur_order.lmtPrice,
+                        getattr(cur_order, 'trailStopPrice', None),
                         cur_order.parentId,
                         cur_order.transmit,
                         current_time.isoformat()
@@ -188,9 +190,10 @@ class Database:
                         'quantity': row[3],
                         'aux_price': row[4],
                         'lmt_price': row[5],
-                        'parent_id': row[6],
-                        'transmit': row[7],
-                        'created_timestamp': row[8]
+                        'trail_stop_price': row[6],
+                        'parent_id': row[7],
+                        'transmit': row[8],
+                        'created_timestamp': row[9]
                     }
                 return None
         except Exception as e:
@@ -362,6 +365,7 @@ class Database:
                         quantity = ?,
                         aux_price = ?,
                         lmt_price = ?,
+                        trail_stop_price = ?,
                         parent_id = ?,
                         transmit = ?
                     WHERE order_id = ?
@@ -371,6 +375,7 @@ class Database:
                     order.quantity,
                     order.aux_price,
                     order.lmt_price,
+                    getattr(order, 'trail_stop_price', None),
                     order.parent_id,
                     order.transmit,
                     order.order_id
