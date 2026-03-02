@@ -7,7 +7,6 @@ from ibapi.client import EClient
 from ibapi.wrapper import EWrapper, OrderState
 from ibapi.contract import Contract
 from ibapi.order import Order
-from ibapi.order_cancel import OrderCancel
 from ibapi.common import BarData
 import logging
 import socket
@@ -42,6 +41,7 @@ class IBConnection(EWrapper, EClient):
         self.positions = {}
         self.historical_data = {}
         self.pnl_data = {}
+        self.account_pnl = {}
         self.account_summary = {}
         self.position_data = {}
         self._order_statuses = {}
@@ -51,6 +51,9 @@ class IBConnection(EWrapper, EClient):
         # self.current_contract = None
         self.connected = False
         self.open_orders_requested = False
+        self.open_orders_end = threading.Event()
+        self.positions_end = threading.Event()
+        self.account_pnl_req_id = None
 
         # Lock to ensure thread-safe operations for tracking request ids
         self.lock = threading.Lock()
@@ -283,15 +286,13 @@ class IBConnection(EWrapper, EClient):
 
     def get_positions(self):
         """Get current portfolio positions"""
+        self.positions_end.clear()
         self.positions[self.account_id] = []
         self.reqPositions() 
 
-        timeout = self.timeout
-        while not self.positions[self.account_id] and timeout > 0:
-            time.sleep(0.1)
-            timeout -= 0.1
+        self.positions_end.wait(timeout=self.timeout)
 
-        return self.positions.pop(self.account_id, [])
+        return self.positions.get(self.account_id, [])
     
     def position(self, account: str, contract: Contract, pos: float, avg_cost: float):
         """Callback for position updates"""
@@ -301,6 +302,38 @@ class IBConnection(EWrapper, EClient):
                 'position': pos,
                 'avg_cost': avg_cost
             })
+
+        # Also store in position_data for easier access by ticker
+        self.position_data[contract.symbol] = {
+            'contract': contract,
+            'position': pos,
+            'avg_cost': avg_cost
+        }
+
+    def positionEnd(self):
+        """Callback for end of positions"""
+        self.positions_end.set()
+
+    def subscribe_account_pnl(self):
+        """Subscribe to PnL updates for the entire account"""
+        if self.account_pnl_req_id is None:
+            self.account_pnl_req_id = self.get_next_req_id()
+            self.account_pnl[self.account_pnl_req_id] = None
+            self.reqPnL(self.account_pnl_req_id, self.account_id, "")
+
+    def get_account_pnl(self):
+        """Get the latest account PnL data"""
+        self.subscribe_account_pnl()
+        return self.account_pnl.get(self.account_pnl_req_id, None)
+
+    def pnl(self, reqId: int, dailyPnL: float, unrealizedPnL: float, realizedPnL: float):
+        """Callback for account PnL"""
+        if reqId == self.account_pnl_req_id:
+            self.account_pnl[reqId] = {
+                'daily_pnl': dailyPnL,
+                'unrealized_pnl': unrealizedPnL,
+                'realized_pnl': realizedPnL
+            }
 
     def get_account_summary(self):
         """Get all account summary information using the $LEDGER tag"""
@@ -491,9 +524,10 @@ class IBConnection(EWrapper, EClient):
         return bracketOrder
 
     def request_open_orders(self):
-        if not self.open_orders_requested:
-            self.reqOpenOrders()
-            self.open_orders_requested = True
+        self.open_orders_end.clear()
+        self.open_orders.clear()
+        self.reqOpenOrders()
+        self.open_orders_end.wait(timeout=self.timeout)
 
     def get_open_order(self, order_id: int) -> Order:
         """Get the open order for a specific order ID"""
@@ -509,12 +543,12 @@ class IBConnection(EWrapper, EClient):
 
     def openOrderEnd(self):
         """Callback for end of open orders"""
-        pass
+        self.open_orders_end.set()
 
     def cancel_order(self, order_id: int):
         """Cancel a specific order by its ID. OrderStatus callback is used"""
         self._order_statuses[order_id] = {}
-        self.cancelOrder(order_id, OrderCancel())
+        self.cancelOrder(order_id)
 
         timeout = self.timeout
         while not self._order_statuses[order_id] and timeout > 0:

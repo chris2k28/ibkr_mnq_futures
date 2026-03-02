@@ -4,7 +4,6 @@ import datetime
 import pytz
 import pandas as pd
 import os
-from src.db.database import Database
 import logging
 from src.utilities.utils import trading_day_start_time_ts
 import holidays
@@ -39,13 +38,10 @@ class RiskManager:
             return True
         return False
     
-    def set_trading_pause_time(self, db: Database = None):
+    def set_trading_pause_time(self):
         """Set the start time for trading pause"""
         self.pause_start_time = pd.Timestamp.now(tz=self.timezone)
         self.pause_end_time = self.pause_start_time + pd.Timedelta(hours=self.trading_pause_hours)
-
-        if db is not None:
-            db.add_trading_pause(self.pause_start_time, self.pause_end_time)
 
     def can_resume_trading_after_pause(self, now: pd.Timestamp):
         """Check if trading can resume after pause"""
@@ -88,23 +84,6 @@ class RiskManager:
         else:
             return False
 
-    def populate_from_db(self, db: Database):
-        """Load trading pauses from database and simply set the pause times
-        based of the latest entry in the db"""
-        logging.info(f"RiskManager: Populating trading pause times from DB")
-
-        trading_pauses = db.get_trading_pauses()
-
-        if len(trading_pauses) == 0:
-            logging.info("No trading pauses found in database")
-            return
-        
-        latest_pause = trading_pauses[-1]
-        self.pause_start_time = latest_pause['start_time']
-        self.pause_end_time = latest_pause['end_time']
-        logging.debug(f"Loaded trading pause: {latest_pause['start_time']} to {latest_pause['end_time']}")
-        return
-    
     def perform_eod_close(self, 
                            now: pd.Timestamp, 
                            eod_exit_time: str, 
