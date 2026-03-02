@@ -60,6 +60,8 @@ class Configuration:
         self.bollinger_std = self.config.getint('Technical_Indicators', 'bollinger_std')
         self.rsi_period = self.config.getint('Technical_Indicators', 'rsi_period')
         self.rsi_threshold = self.config.getint('Technical_Indicators', 'rsi_threshold')
+        self.rsi_oversold = self.config.getint('Technical_Indicators', 'rsi_oversold')
+        self.rsi_overbought = self.config.getint('Technical_Indicators', 'rsi_overbought')
 
     def _configure_log(self, log_level: str):
         if log_level == "Debug":

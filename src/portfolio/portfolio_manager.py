@@ -64,10 +64,12 @@ class PortfolioManager:
                     order_details = self.api.get_open_order(order.orderId)
                     contract = order_details['contract']
                     
-                    if order.orderType == 'MKT' and order.action == 'BUY':
+                    if order.orderType == 'MKT':
 
                         if len(self.positions) == 0:
-                            logging.info(f"Buy order filled, creating new position.")
+                            logging.info(f"{order.action} order filled, creating new position.")
+
+                            quantity = int(order.totalQuantity) if order.action == 'BUY' else -int(order.totalQuantity)
 
                             position = Position(
                             ticker=contract.symbol,
@@ -75,7 +77,7 @@ class PortfolioManager:
                             currency=contract.currency,
                             expiry=contract.lastTradeDateOrContractMonth,
                             contract_id=contract.conId,
-                            quantity=int(order.totalQuantity),
+                            quantity=quantity,
                             avg_price=order_status['avg_fill_price'],
                             timezone=self.config.timezone,
                             )
@@ -88,16 +90,21 @@ class PortfolioManager:
                             self.orders[bracket_idx][order_idx] = (order, True)
 
                         else:
-                            logging.info(f"Buy order filled, updating position.")
+                            logging.info(f"{order.action} order filled, updating position.")
 
                             position = copy.deepcopy(self.positions[-1])
 
-                            total_quantity = position.quantity + int(order.totalQuantity)
-                            avg_price = position.quantity * position.avg_price
-                            avg_price += int(order.totalQuantity) * order_status['avg_fill_price'] 
-                            avg_price /= total_quantity
+                            change_in_quantity = int(order.totalQuantity) if order.action == 'BUY' else -int(order.totalQuantity)
+                            new_total_quantity = position.quantity + change_in_quantity
 
-                            position.quantity = total_quantity
+                            if new_total_quantity != 0:
+                                avg_price = abs(position.quantity) * position.avg_price
+                                avg_price += abs(change_in_quantity) * order_status['avg_fill_price']
+                                avg_price /= (abs(position.quantity) + abs(change_in_quantity))
+                            else:
+                                avg_price = 0 # Position closed
+
+                            position.quantity = new_total_quantity
                             position.avg_price = avg_price
 
                             self.orders[bracket_idx][order_idx] = (order, True)
@@ -106,40 +113,24 @@ class PortfolioManager:
                             self.db.add_position(position)
 
                             self.db.update_order_status(order.orderId, order_status)
-
-                    elif order.orderType == 'MKT' and order.action == 'SELL':
-
-                        logging.info(f"Market sell order filled, updating position.")
-
-                        position = copy.deepcopy(self.positions[-1])
-
-                        total_quantity = position.quantity - int(order.totalQuantity)
-                        avg_price = position.quantity * position.avg_price
-                        avg_price += int(order.totalQuantity) * order_status['avg_fill_price'] 
-                        avg_price /= (position.quantity + int(order.totalQuantity))
-
-                        position.quantity = total_quantity
-                        position.avg_price = avg_price
-                        
-                        self.orders[bracket_idx][order_idx] = (order, True)
-
-                        self.positions.append(position)
-                        self.db.add_position(position)
-
-                        self.db.update_order_status(order.orderId, order_status)
                     
-                    elif order.orderType in ['STP', 'TRAIL', 'LMT'] and order.action == 'SELL':
+                    elif order.orderType in ['STP', 'TRAIL', 'LMT']:
 
                         logging.info(f"{order.orderType} order filled, updating position.")
 
                         position = copy.deepcopy(self.positions[-1])
 
-                        total_quantity = position.quantity - int(order.totalQuantity)
-                        avg_price = position.quantity * position.avg_price
-                        avg_price += int(order.totalQuantity) * order_status['avg_fill_price'] 
-                        avg_price /= (position.quantity + int(order.totalQuantity))
+                        change_in_quantity = int(order.totalQuantity) if order.action == 'BUY' else -int(order.totalQuantity)
+                        new_total_quantity = position.quantity + change_in_quantity
 
-                        position.quantity = total_quantity
+                        if new_total_quantity != 0:
+                            avg_price = abs(position.quantity) * position.avg_price
+                            avg_price += abs(change_in_quantity) * order_status['avg_fill_price']
+                            avg_price /= (abs(position.quantity) + abs(change_in_quantity))
+                        else:
+                            avg_price = 0 # Position closed
+
+                        position.quantity = new_total_quantity
                         position.avg_price = avg_price
 
                         self.orders[bracket_idx][order_idx] = (order, True)
@@ -180,21 +171,8 @@ class PortfolioManager:
 
                 if order_status['status'] == 'Filled':
                     
-                    if order.orderType in ['STP', 'TRAIL', 'LMT'] and order.action == 'SELL':
-
-                        current_order_pnl += order_status['avg_fill_price'] * int(order_status['filled'])
-
-                    elif order.orderType == 'MKT' and order.action == 'BUY':
-
-                        current_order_pnl -= order_status['avg_fill_price'] * int(order_status['filled'])
-
-                    elif order.orderType == 'MKT' and order.action == 'SELL':
-
-                        current_order_pnl += order_status['avg_fill_price'] * int(order_status['filled'])
-
-                    else:
-
-                        raise TypeError(f"Order type {order.orderType} with action {order.action} is not supported.")
+                    multiplier = 1 if order.action == 'SELL' else -1
+                    current_order_pnl += multiplier * order_status['avg_fill_price'] * int(order_status['filled'])
                     
                     filled_count += 1
                 
@@ -203,9 +181,9 @@ class PortfolioManager:
 
         return pnl
 
-    def place_bracket_order(self, contract: Contract = None):
+    def place_bracket_order(self, action: str = "BUY", contract: Contract = None):
         """Place a bracket order"""
-        logging.debug("Placing bracket order.")
+        logging.debug(f"Placing {action} bracket order.")
         contract = self.get_current_contract() if contract is None else contract
 
         mid_price = self.api.get_latest_mid_price(contract)
@@ -214,8 +192,12 @@ class PortfolioManager:
             logging.error(f"No mid price found for contract {contract.symbol}. Cannot place bracket order.")
             return
         
-        stop_loss_price = mid_price - (self.config.stop_loss_ticks * self.config.mnq_tick_size)
-        take_profit_limit_price = mid_price + (self.config.take_profit_ticks * self.config.mnq_tick_size)
+        if action == "BUY":
+            stop_loss_price = mid_price - (self.config.stop_loss_ticks * self.config.mnq_tick_size)
+            take_profit_limit_price = mid_price + (self.config.take_profit_ticks * self.config.mnq_tick_size)
+        else: # SELL
+            stop_loss_price = mid_price + (self.config.stop_loss_ticks * self.config.mnq_tick_size)
+            take_profit_limit_price = mid_price - (self.config.take_profit_ticks * self.config.mnq_tick_size)
 
         stop_loss_price = round(stop_loss_price/self.config.mnq_tick_size) * self.config.mnq_tick_size
         take_profit_limit_price = round(take_profit_limit_price/self.config.mnq_tick_size) * self.config.mnq_tick_size
@@ -223,11 +205,11 @@ class PortfolioManager:
         logging.debug(f"STP price: {stop_loss_price}, LMT price: {take_profit_limit_price}")
 
         bracket = self.api.create_bracket_order(
-            "BUY", 
+            action,
             self.config.number_of_contracts, 
             take_profit_limit_price, 
             stop_loss_price,
-            trailing_stop_ticks=self.config.trailing_stop_ticks if self.config.use_trailing_stop else None)
+            trailing_stop_ticks=(self.config.trailing_stop_ticks * self.config.mnq_tick_size) if self.config.use_trailing_stop else None)
         
         self.api.place_orders(bracket, contract)
 
@@ -448,7 +430,7 @@ class PortfolioManager:
                     self.api.cancel_order(order.orderId)
 
     def close_all_positions(self):
-        """Close all open positions by issuing market sell orders."""
+        """Close all open positions by issuing market orders."""
         logging.info("Closing all open positions.")
 
         if len(self.positions) == 0:
@@ -458,7 +440,7 @@ class PortfolioManager:
         # The last position entry is the current position
         position = self.positions[-1]
 
-        if position.quantity > 0:
+        if position.quantity != 0:
             logging.info(f"Closing position for {position.ticker} with quantity {position.quantity}")
             matching_position = self.api.get_matching_position(position)
 
@@ -468,7 +450,7 @@ class PortfolioManager:
                 return
 
             native_contract_quantity = int(matching_position['position'])
-            if position.quantity > native_contract_quantity:
+            if abs(position.quantity) > abs(native_contract_quantity):
                 msg = f"Trying to close position {position.ticker} with quantity {position.quantity}."
                 msg += f" Only {native_contract_quantity} contracts are found on IBKR. Cannot close local position."
                 logging.error(msg)
@@ -482,7 +464,8 @@ class PortfolioManager:
             contract.lastTradeDateOrContractMonth = position.expiry
 
             # Place the order
-            order_id, _ = self.api.place_market_order(contract, "SELL", position.quantity)
+            action = "SELL" if position.quantity > 0 else "BUY"
+            order_id, _ = self.api.place_market_order(contract, action, abs(position.quantity))
             order_details = self.api.get_open_order(order_id)
             self.orders.append([(order_details['order'], False)])
 
@@ -493,13 +476,9 @@ class PortfolioManager:
 
             self.update_positions()
 
-        elif position.quantity == 0:
+        else:
             msg = f"Position {position.ticker} with quantity {position.quantity}. No positions to close"
             logging.info(msg)
-        else:
-            msg = f"Trying to close position {position.ticker} with quantity {position.quantity}. None handled scenario."
-            logging.error(msg)
-            raise NotImplementedError(msg)
     
     def _total_orders(self):
         return sum(len(bracket_order) for bracket_order in self.orders)

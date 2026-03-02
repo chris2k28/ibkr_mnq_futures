@@ -6,6 +6,7 @@ import logging
 from src.api.ibkr_api import IBConnection
 from src.configuration import Configuration
 from src.strategys.bb_rsi_strategy import BollingerBandRSIStrategy
+from src.strategys.reversal_strategy import ReversalStrategy
 from src.utilities.enums import Signal
 from src.db.database import Database
 import pandas as pd
@@ -34,6 +35,7 @@ class TradingSystem:
             cfg.stop_loss_ticks, 
             cfg.take_profit_ticks)
         self.strategy = BollingerBandRSIStrategy()
+        self.reversal_strategy = ReversalStrategy()
         self.config = cfg
         self.db = Database(self.config.timezone)
         self.portfolio_manager = PortfolioManager(cfg, self.api, self.db)
@@ -168,6 +170,8 @@ class TradingSystem:
             
         if self.config.strategy == 'bollinger_rsi':
             signal = self.strategy.generate_signals(self.market_data, self.config)
+        elif self.config.strategy == 'reversal':
+            signal = self.reversal_strategy.generate_signals(self.market_data, self.config)
         elif self.config.strategy == 'buy':
             signal = Signal.BUY #for testing
         else:
@@ -177,14 +181,22 @@ class TradingSystem:
         logging.info(f"Signal generated: {signal.name}")
 
         position_quantity = self.portfolio_manager.current_position_quantity()
-        if position_quantity > 0 and signal == Signal.BUY:
-            logging.info(f"Currently holding {position_quantity} shares of {self.config.ticker}. Cannot enter more.")
 
-        elif self.portfolio_manager.has_pending_orders() and signal == Signal.BUY:
-            logging.info("Orders are pending. Cannot enter more.")
+        if signal == Signal.BUY:
+            if position_quantity > 0:
+                logging.info(f"Currently holding {position_quantity} shares of {self.config.ticker}. Cannot enter more.")
+            elif self.portfolio_manager.has_pending_orders():
+                logging.info("Orders are pending. Cannot enter more.")
+            elif position_quantity == 0:
+                self.portfolio_manager.place_bracket_order(action="BUY")
 
-        elif position_quantity == 0 and signal == Signal.BUY:
-            self.portfolio_manager.place_bracket_order()
+        elif signal == Signal.SELL:
+            if position_quantity < 0:
+                logging.info(f"Currently holding {position_quantity} shares of {self.config.ticker}. Cannot enter more.")
+            elif self.portfolio_manager.has_pending_orders():
+                logging.info("Orders are pending. Cannot enter more.")
+            elif position_quantity == 0:
+                self.portfolio_manager.place_bracket_order(action="SELL")
 
         else:
             logging.info("Not placing any orders")
